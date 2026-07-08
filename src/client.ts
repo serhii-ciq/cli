@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import axios, { type AxiosInstance } from "axios";
 import chalk from "chalk";
+import FormData from "form-data";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -102,5 +103,24 @@ export async function apiGet(
 		? `?input=${encodeURIComponent(JSON.stringify(params))}`
 		: "";
 	const response = await client.get(`/trpc/${endpoint}${query}`);
+	return response.data?.result?.data?.json ?? response.data;
+}
+
+export async function apiPostMultipart(
+	endpoint: string,
+	formData: FormData,
+): Promise<unknown> {
+	const auth = readAuthConfig();
+	const response = await axios.post(
+		`${auth.url}/api/${endpoint}`,
+		formData,
+		{
+			headers: {
+				"x-api-key": auth.token,
+				...formData.getHeaders(),
+			},
+			maxBodyLength: Number.POSITIVE_INFINITY,
+		},
+	);
 	return response.data?.result?.data?.json ?? response.data;
 }

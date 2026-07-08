@@ -1,11 +1,11 @@
-# Dokploy CLI
+# Dokploy CLI (CIQ fork)
 
-Dokploy CLI is a command-line tool to manage your Dokploy server remotely. It provides **449 commands** auto-generated from the Dokploy OpenAPI spec, covering every API endpoint.
+Dokploy CLI is a command-line tool to manage your Dokploy server remotely. It provides **449 commands** auto-generated from the Dokploy OpenAPI spec, plus a custom `deploy` command for one-step static/app deployments.
 
 ## Installation
 
 ```bash
-npm install -g @dokploy/cli
+npm install -g @serhii-ciq/dokploy-cli
 ```
 
 ## Authentication
@@ -13,13 +13,13 @@ npm install -g @dokploy/cli
 ### Option 1: Using the `auth` command
 
 ```bash
-dokploy auth -u https://panel.dokploy.com -t YOUR_API_KEY
+dokploy auth -u https://console.cloud.creatoriq.com -t YOUR_API_KEY
 ```
 
 ### Option 2: Environment variables
 
 ```bash
-export DOKPLOY_URL="https://panel.dokploy.com"
+export DOKPLOY_URL="https://console.cloud.creatoriq.com"
 export DOKPLOY_API_KEY="YOUR_API_KEY"
 ```
 
@@ -28,13 +28,66 @@ export DOKPLOY_API_KEY="YOUR_API_KEY"
 Create a `.env` file in your working directory:
 
 ```env
-DOKPLOY_URL="https://panel.dokploy.com"
+DOKPLOY_URL="https://console.cloud.creatoriq.com"
 DOKPLOY_API_KEY="YOUR_API_KEY"
 ```
 
 The CLI loads it automatically. Shell environment variables take priority over the `.env` file.
 
-## Usage
+## Quick deploy
+
+Deploy a directory to Dokploy in one command (similar to `vercel deploy`):
+
+```bash
+dokploy deploy .
+```
+
+On the first run it creates a project, application, uploads the code as a ZIP, waits for the build to finish, creates a domain, and prints the URL. A `.dokploy/config.json` file is saved so subsequent deploys only re-upload and rebuild.
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--name <name>` | directory basename | Project and application name |
+| `--build-type <type>` | `static` | `static`, `railpack`, or `dockerfile` |
+| `--publish-dir <dir>` | `.` | Directory nginx serves (static only) |
+| `--port <port>` | `80` | Container port for the domain |
+| `--spa` | off | SPA mode: nginx `try_files` fallback to `index.html` |
+| `--json` | off | Output raw JSON |
+| `--debug` | off | Show full API error responses |
+
+### Examples
+
+```bash
+# Static site (default)
+dokploy deploy ./my-site
+
+# SPA (React/Vue/Angular)
+dokploy deploy ./dist --spa --name my-app
+
+# Node.js app with Railpack
+dokploy deploy . --build-type railpack --port 3000
+
+# Redeploy (same directory, config already exists)
+dokploy deploy .
+```
+
+### `.dokploy/config.json`
+
+Created automatically on first deploy. Add `.dokploy/` to your `.gitignore`.
+
+```json
+{
+  "projectId": "...",
+  "environmentId": "...",
+  "applicationId": "...",
+  "appName": "my-app-a1b2c3",
+  "buildType": "static",
+  "url": "https://my-app-a1b2c3.cloud.creatoriq.com"
+}
+```
+
+## Usage (generated commands)
 
 ```bash
 dokploy <group> <action> [options]
@@ -109,36 +162,44 @@ dokploy application deploy --help
 
 ```bash
 # Install dependencies
-pnpm install
+npm install --legacy-peer-deps
 
-# Run in dev mode
-pnpm run dev -- project all
+# Run without building (tsx transpiles on the fly)
+npx tsx src/index.ts deploy . --name test
 
-# Regenerate commands from OpenAPI spec
-pnpm run generate
+# Build TypeScript (skip prebuild which requires pnpm)
+npx tsc -b
 
-# Build
-pnpm run build
+# Use local build globally via symlink
+npm link
 
-# Lint & format
-pnpm run lint
+# Remove the symlink
+npm unlink -g @serhii-ciq/dokploy-cli
 ```
 
-### Updating commands
+### Updating generated commands
 
 Commands are auto-generated from `openapi.json`. To update:
 
 1. Replace `openapi.json` with the latest spec from the [Dokploy repo](https://github.com/Dokploy/dokploy)
-2. Run `pnpm run generate`
-3. Build with `pnpm run build`
+2. Run `npx tsx scripts/generate.ts`
+3. Build with `npx tsc -b`
 
-## Contributing
+### Publishing to npm
 
-If you want to contribute to Dokploy CLI, please check out our [Contributing Guide](https://github.com/Dokploy/cli/blob/main/CONTRIBUTING.md).
+```bash
+# Set the npm token (one-time, or use NPM_TOKEN env var)
+# The local .npmrc is configured to use https://registry.npmjs.org/
 
-## Support
+# Bump version
+npm version patch  # or minor / major
 
-If you encounter any issues or have any questions, please [open an issue](https://github.com/Dokploy/cli/issues) in our GitHub repository.
+# Build and publish
+npx tsc -b
+NPM_TOKEN=<your-npm-token> npm publish --access public
+```
+
+Package: [`@serhii-ciq/dokploy-cli`](https://www.npmjs.com/package/@serhii-ciq/dokploy-cli)
 
 ## License
 
