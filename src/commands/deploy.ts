@@ -37,13 +37,48 @@ function extractApiMessage(err: unknown): { short: string; full: string } {
 const CONFIG_DIR = ".dokploy";
 const CONFIG_FILE = "config.json";
 
-const ZIP_EXCLUDE_GLOBS = [
+const ZIP_EXCLUDE_DEFAULTS = [
 	".git/**",
 	"node_modules/**",
 	".dokploy/**",
 	".next/**",
 	".env",
 ];
+
+function toGlob(pattern: string, directory: string): string[] {
+	const clean = pattern.replace(/^\/+/, "");
+	if (clean.includes("*") || clean.includes("?")) return [clean];
+	const full = path.join(directory, clean);
+	if (fs.existsSync(full) && fs.statSync(full).isDirectory()) {
+		return [clean, `${clean}/**`];
+	}
+	return [clean, `${clean}/**`];
+}
+
+function readIgnoreFile(directory: string): string[] {
+	for (const name of [".dokployignore", ".vercelignore"]) {
+		const filePath = path.join(directory, name);
+		if (fs.existsSync(filePath)) {
+			const lines = fs.readFileSync(filePath, "utf8").split("\n");
+			const raw = lines
+				.map((l) => l.trim())
+				.filter((l) => l && !l.startsWith("#"));
+			const patterns = raw.flatMap((p) => toGlob(p, directory));
+			console.log(chalk.gray(`Using ${name} (${raw.length} rules → ${patterns.length} globs)`));
+			return patterns;
+		}
+	}
+	return [];
+}
+
+function buildExcludeGlobs(directory: string): string[] {
+	const custom = readIgnoreFile(directory);
+	const merged = [...ZIP_EXCLUDE_DEFAULTS];
+	for (const p of custom) {
+		if (!merged.includes(p)) merged.push(p);
+	}
+	return merged;
+}
 
 interface DeployConfig {
 	projectId: string;
@@ -79,6 +114,7 @@ async function createZip(directory: string): Promise<string> {
 	const tmpFile = path.join(os.tmpdir(), `dokploy-deploy-${Date.now()}.zip`);
 	const output = fs.createWriteStream(tmpFile);
 	const archive = archiver("zip", { zlib: { level: 9 } });
+	const ignore = buildExcludeGlobs(directory);
 
 	return new Promise((resolve, reject) => {
 		output.on("close", () => resolve(tmpFile));
@@ -87,7 +123,7 @@ async function createZip(directory: string): Promise<string> {
 		archive.glob("**/*", {
 			cwd: directory,
 			dot: true,
-			ignore: ZIP_EXCLUDE_GLOBS,
+			ignore,
 		});
 		archive.finalize();
 	});
@@ -104,6 +140,32 @@ async function uploadZip(
 		contentType: "application/zip",
 	});
 	await apiPostMultipart("application.dropDeployment", form);
+}
+
+async function getCurrentUserEmail(): Promise<string> {
+	const user = await apiGet("user.get") as {
+		user: { email: string; firstName: string };
+	};
+	return user.user.email ?? user.user.firstName ?? "unknown";
+}
+
+function emailToTagName(email: string): string {
+	return email.split("@")[0];
+}
+
+async function tagProject(projectId: string, tagName: string): Promise<void> {
+	const allTags = await apiGet("tag.all") as Array<{ tagId: string; name: string }>;
+	let tag = allTags.find((t) => t.name === tagName);
+
+	if (!tag) {
+		tag = await apiPost("tag.create", { name: tagName, color: "#6366f1" }) as { tagId: string; name: string };
+	}
+
+	try {
+		await apiPost("tag.assignToProject", { tagId: tag.tagId, projectId });
+	} catch {
+		// tag may already be assigned
+	}
 }
 
 const POLL_INTERVAL_MS = 3000;
@@ -182,12 +244,11 @@ export function registerDeployCommand(program: Command) {
 			try {
 				let config = readDeployConfig(targetDir);
 
-				if (config) {
-					await redeployExisting(config, targetDir, jsonOutput);
-				} else {
-					config = await deployNew(targetDir, appName, opts.buildType, opts.publishDir, port, opts.spa ?? false, jsonOutput);
-					writeDeployConfig(targetDir, config);
-				}
+			if (config) {
+				await redeployExisting(config, targetDir, jsonOutput);
+			} else {
+				config = await deployNew(targetDir, appName, opts.buildType, opts.publishDir, port, opts.spa ?? false, jsonOutput);
+			}
 			} catch (err) {
 				const { short, full } = extractApiMessage(err);
 				console.error(chalk.red(short));
@@ -208,13 +269,23 @@ async function deployNew(
 	spa: boolean,
 	jsonOutput: boolean,
 ): Promise<DeployConfig> {
+	const email = await getCurrentUserEmail();
+	console.log(chalk.gray(`Deploying as ${email}`));
+
 	console.log(chalk.blue(`Creating project "${name}"...`));
-	const project = await apiPost("project.create", { name }) as {
+	const project = await apiPost("project.create", {
+		name,
+		description: `deployed-by:${email}`,
+	}) as {
 		project: { projectId: string };
 		environment: { environmentId: string };
 	};
 	const { projectId } = project.project;
 	const { environmentId } = project.environment;
+
+	const userTag = emailToTagName(email);
+	console.log(chalk.blue(`Tagging project with "${userTag}"...`));
+	await tagProject(projectId, userTag);
 
 	console.log(chalk.blue("Creating application..."));
 	const app = await apiPost("application.create", {
@@ -236,19 +307,6 @@ async function deployNew(
 		herokuVersion: "24",
 		railpackVersion: "0.15.4",
 	});
-
-	console.log(chalk.blue("Creating archive..."));
-	const zipPath = await createZip(directory);
-	const zipSizeMB = (fs.statSync(zipPath).size / 1024 / 1024).toFixed(2);
-	console.log(chalk.blue(`Uploading ${zipSizeMB} MB...`));
-
-	try {
-		await uploadZip(applicationId, zipPath);
-	} finally {
-		fs.unlinkSync(zipPath);
-	}
-
-	await waitForBuild(applicationId);
 
 	const host = `${appName}.cloud.creatoriq.com`;
 	console.log(chalk.blue(`Creating domain ${host}...`));
@@ -274,11 +332,26 @@ async function deployNew(
 		url,
 	};
 
+	writeDeployConfig(directory, config);
+	console.log(chalk.gray("Config saved to .dokploy/config.json"));
+
+	console.log(chalk.blue("Creating archive..."));
+	const zipPath = await createZip(directory);
+	const zipSizeMB = (fs.statSync(zipPath).size / 1024 / 1024).toFixed(2);
+	console.log(chalk.blue(`Uploading ${zipSizeMB} MB...`));
+
+	try {
+		await uploadZip(applicationId, zipPath);
+	} finally {
+		fs.unlinkSync(zipPath);
+	}
+
+	await waitForBuild(applicationId);
+
 	if (jsonOutput) {
 		console.log(JSON.stringify(config, null, 2));
 	} else {
 		console.log(chalk.green(`\nDeployed to ${url}`));
-		console.log(chalk.gray("Config saved to .dokploy/config.json"));
 	}
 
 	return config;
